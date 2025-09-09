@@ -1,110 +1,147 @@
-# Documentación del Setup de Simulación de Arribos (Parte 0)
+# Documentación del Setup de Simulación AEP (versión modular)
 
-Este documento describe las funciones implementadas para la simulación de arribos de aviones a AEP.  
-Incluye: parámetros globales, funciones auxiliares, función principal y ejemplos de uso.
+Este documento describe en detalle la simulación de arribos de aviones al Aeroparque (AEP).  
+Incluye parámetros globales, clases, funciones auxiliares, lógica central, funciones de visualización y flujo general del sistema.
 
 ---
 
 ## 1. Parámetros globales
 
-Definidos en el bloque inicial, controlan la dinámica general:
+Definen las condiciones iniciales y restricciones de la simulación:
 
-- `DISTANCIA_INICIAL`: 100 mn desde donde aparece el avión.
-- `VEL_MAX`: velocidad máxima en mn/min.
-- `VEL_MIN`: velocidad mínima en mn/min.
-- `TIEMPO_TOTAL`: duración de la simulación (default = 1 día = 1440 min).
-- `DT`: paso de simulación en minutos (default = 1).
-- `SEPARACION_SEGURA`: separación mínima en millas náuticas.
-- `GAP_TIEMPO`: separación mínima de 10 min entre aterrizajes.
-- `PROB_INTERRUPCION`: 0.1 (probabilidad de interrupción por viento).
-- `CIERRE_TORMENTA`: 30 min (duración de cierre de AEP).
-- `MAX_ATRASO`: 90 min (si un avión supera este atraso se desvía a Montevideo).
+- `DISTANCIA_INICIAL = 100.0`  
+  Distancia en millas náuticas (mn) desde la cual aparece un avión en el radar.
 
-Estos valores se pueden ajustar según el escenario.
+- `VEL_MARCHA_ATRAS = 200.0`  
+  Velocidad en nudos utilizada cuando un avión entra en **marcha atrás** (retroceso).
 
----
+- `GAP_MIN = 4.0`  
+  Separación mínima aceptable entre aviones en minutos.
 
-## 2. Funciones principales
+- `GAP_BUFFER = 5.0`  
+  Buffer objetivo de separación temporal entre aviones (para reinserción).
 
-### `generar_arribos(lam, tiempo_total=TIEMPO_TOTAL, seed=None)`
-- **Objetivo:** Genera los tiempos de arribo de aviones según un proceso de Poisson con parámetro λ.  
-- **Entradas:**
-  - `lam`: probabilidad de arribo por minuto.
-  - `tiempo_total`: duración de la simulación (min).
-  - `seed`: semilla opcional para reproducibilidad.
-- **Salida:** lista de tiempos de arribo (en minutos).
+- `GAP_REINSERCION = 10.0`  
+  Separación mínima requerida para que un avión pueda volver a insertarse en la cola.
+
+- `DT = 1`  
+  Paso temporal de la simulación (1 minuto).
 
 ---
 
-### `reinsertar_por_viento(arribo, ultimo_aterrizaje)`
-- **Objetivo:** Modela la interrupción por viento. El avión aborta y se reinserta después de un hueco seguro.  
-- **Entradas:**
-  - `arribo`: tiempo original de arribo.
-  - `ultimo_aterrizaje`: tiempo del último aterrizaje confirmado.
-- **Salida:** nuevo tiempo de arribo seguro (>= último_aterrizaje + GAP_TIEMPO).
+## 2. Clase `Avion`
+
+La clase **Avion** modela el comportamiento individual de cada aeronave.
+
+### Atributos principales
+- `num`: identificador único del avión.
+- `tiempo_radar`: minuto en el que aparece en radar.
+- `posicion`: distancia actual a AEP (mn).
+- `velocidad_actual`: velocidad en nudos.
+- `estado`: puede ser `"en_vuelo"`, `"marcha_atras"`, `"desviado"`, `"aterrizado"`.
+- `historial_posiciones`: lista de `(minuto, posicion, velocidad)` para trazabilidad.
+- Flags:
+  - `desviado`: booleano.
+  - `aterrizado`: booleano.
+  - `MarchaAt`: 1 si alguna vez estuvo en marcha atrás.
+
+### Métodos clave
+- `velocidad_permitida(distancia=None)` → `(v_max, v_min)` según tramo.  
+- `calcular_tiempo_esperado()` → minutos estimados hasta aterrizaje a máxima velocidad.  
+- `avanzar_minuto(minuto, dt=DT)` → actualiza posición y estado en un paso de simulación.  
+- `__repr__()` → representación legible para debugging.
 
 ---
 
-### `simular_dinamica(arribos, condiciones=None)`
-- **Objetivo:** Simula la trayectoria de cada avión desde su arribo hasta aterrizaje o desvío.  
-- **Entradas:**
-  - `arribos`: lista de tiempos de arribo generados.
-  - `condiciones`: diccionario con flags de escenario:
-    - `{"viento": True}` → aplica interrupciones aleatorias.
-    - `{"tormenta": (t_inicio, t_fin)}` → aeropuerto cerrado en ese intervalo.
-- **Salida:** diccionario con:
-  - `"aterrizados"`: cantidad de aviones aterrizados.
-  - `"desviados"`: cantidad de desvíos a Montevideo.
-  - `"atrasos"`: lista de atrasos individuales.
-  - `"congestion"`: número de veces que se forzó un atraso por separación.
-  - `"trayectorias"`: lista con detalle de cada avión (arribo, arribo_real, atraso, desviado).
+## 3. Generación de vuelos
+
+### `generar_vuelos(T, lam)`
+Genera una lista de objetos `Avion` con tiempos de aparición en radar aleatorios.  
+Cada minuto, un avión aparece con probabilidad `λ`.
+
+**Entrada:**  
+- `T`: duración de la simulación (minutos).  
+- `lam`: probabilidad de arribo por minuto.  
+
+**Salida:**  
+- Lista de instancias de `Avion`.
 
 ---
 
-### `calcular_metricas(resultados)`
-- **Objetivo:** Calcula métricas agregadas de performance.  
-- **Entradas:**
-  - `resultados`: salida de `simular_dinamica`.  
-- **Salida:** diccionario con:
-  - `"promedio_atraso"`
-  - `"desviados"`
-  - `"prob_desvio"`
-  - `"frecuencia_congestion"`
+## 4. Funciones auxiliares
+
+- **`seleccionar_aviones_en_vuelo(aviones, minuto)`**  
+  Devuelve un conjunto de aviones visibles en radar, que no hayan aterrizado ni desviado.
+
+- **`insertar_avion(en_vuelo, avion)`**  
+  Inserta un avión en la lista ordenada de los que están en vuelo (por posición).
+
+- **`detectar_inconsistencias(en_vuelo)`**  
+  Verifica duplicados o estados incoherentes en la lista de aviones en vuelo.
+
+- **`procesar_reinsercion(avion, en_vuelo, minuto)`**  
+  Intenta reinsertar un avión que estuvo en marcha atrás, respetando `GAP_REINSERCION`.
 
 ---
 
-### `visualizar(resultados, n=30)`
-- **Objetivo:** Visualizar gráficamente arribos y aterrizajes reales.  
-- **Entradas:**
-  - `resultados`: salida de `simular_dinamica`.
-  - `n`: número de aviones a graficar.  
-- **Salida:** gráfico con puntos:
-  - Azul: arribos planificados.
-  - Verde: aterrizajes realizados.
-  - Rojo: aviones desviados.
+## 5. Lógica central de la simulación
+
+### `simular(T, lam)`
+Función principal que ejecuta la simulación minuto a minuto.
+
+**Entrada:**  
+- `T`: duración total de la simulación.  
+- `lam`: probabilidad de arribo por minuto.  
+
+**Proceso (por minuto):**  
+1. Determinar nuevos aviones en radar.  
+2. Actualizar aviones en vuelo (posición, velocidad, estado).  
+3. Verificar condiciones de separación:  
+   - Si el avión no puede llegar antes del cierre → se desvía.  
+   - Si no cumple separación con el anterior → entra en marcha atrás.  
+   - Si existe espacio → puede reinsertarse.  
+4. Guardar historial de estados y posiciones.  
+
+**Salida:**  
+- Listas de aviones aterrizados, desviados, en vuelo y en marcha atrás.  
+- Registro completo de la evolución minuto a minuto.
 
 ---
 
-### `simular(lam, tiempo_total=TIEMPO_TOTAL, condiciones=None, seed=None)`
-- **Objetivo:** Función de alto nivel que conecta todas las anteriores.  
-- **Entradas:**
-  - `lam`: probabilidad de arribo por minuto.
-  - `tiempo_total`: duración de la simulación.
-  - `condiciones`: diccionario de escenario (`viento`, `tormenta`).
-  - `seed`: semilla opcional.
-- **Salida:** diccionario con:
-  - `"arribos"`: lista de arribos generados.
-  - `"resultados"`: salida de `simular_dinamica`.
-  - `"metricas"`: salida de `calcular_metricas`.
+## 6. Funciones de visualización
+
+- **`graficar_trayectorias(aviones)`**  
+  Muestra la trayectoria de cada avión (posición vs. tiempo).  
+  Colores según estado final:
+  - Verde → aterrizó.  
+  - Rojo → desviado.  
+  - Azul → en vuelo.  
+  - Naranja → marcha atrás.
+
+- **`graficar_separaciones(aviones)`**  
+  Grafica la separación temporal entre aterrizajes consecutivos.
 
 ---
 
-## 3. Flujo de interacción entre funciones
+## 7. Flujo general del sistema
 
 ```mermaid
 flowchart TD
-    A[simular] --> B[generar_arribos]
-    A --> C[simular_dinamica]
-    C --> D[calcular_metricas]
-    C --> E[visualizar]
-
+    A[Inicio] --> B[Generar vuelos con λ]
+    B --> C[Minuto t]
+    C --> D[Seleccionar aviones en vuelo]
+    D --> E[Actualizar posiciones y estados]
+    E --> F{Puede aterrizar?}
+    F -- Sí --> G[Marcar aterrizado]
+    F -- No --> H{Respeta GAP?}
+    H -- No --> I[Marcar marcha atrás]
+    H -- Sí --> J[Continuar en vuelo]
+    I --> K{Espacio para reinserción?}
+    K -- Sí --> L[Reinsertar en flujo]
+    K -- No --> M[Seguir marcha atrás]
+    J --> N[Guardar historial]
+    G --> N
+    M --> N
+    N --> O{t < T?}
+    O -- Sí --> C
+    O -- No --> P[Fin de simulación]
